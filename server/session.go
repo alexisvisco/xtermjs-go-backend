@@ -39,35 +39,6 @@ func newTerminalSession(wsConn *websocket.Conn) *terminalSession {
 	return ts
 }
 
-func (t *terminalSession) safeClosePtyMaster() {
-	if err := t.pty.Close(); err != nil {
-		t.logger.WithError(err).Error("could not close pty master")
-	}
-}
-
-func (t *terminalSession) safeCloseWSConnection() {
-	if err := t.wsConnection.Close(); err != nil {
-		t.logger.WithError(err).Error("could not close receiver connection")
-	}
-}
-
-func (t *terminalSession) copyPTYToWS() {
-	_, err := io.Copy(t.wsMessenger, t.pty)
-	if err != nil {
-		t.logger.Warnf("unable to copy first bytes from pty master: %s", err.Error())
-	}
-}
-
-func (t *terminalSession) waitPtyMaster() {
-	if err := t.pty.Wait(); err != nil {
-		t.logger.WithError(err).Error("finished waiting for pty master")
-	}
-
-	t.processEndEvent <- true
-
-	t.logger.Info("process end")
-}
-
 func (t *terminalSession) Handle() error {
 	pid, err := t.pty.Start("/bin/zsh", nil, os.Environ())
 	if err != nil {
@@ -109,4 +80,33 @@ func (t *terminalSession) listen() {
 			break
 		}
 	}
+}
+
+func (t *terminalSession) safeClosePtyMaster() {
+	if err := t.pty.Close(); err != nil {
+		t.logger.WithError(err).Error("could not close pty master")
+	}
+}
+
+func (t *terminalSession) safeCloseWSConnection() {
+	if err := t.wsConnection.Close(); err != nil {
+		t.logger.WithError(err).Error("could not close receiver connection")
+	}
+}
+
+func (t *terminalSession) copyPTYToWS() {
+	_, err := io.Copy(t.wsMessenger, t.pty)
+	if err != nil {
+		t.logger.Warnf("unable to copy first bytes from pty master: %s", err.Error())
+	}
+}
+
+func (t *terminalSession) waitPtyMaster() {
+	if err := t.pty.Wait(); err != nil {
+		t.logger.WithError(err).Error("finished waiting for pty master")
+	}
+
+	t.processEndEvent <- true
+
+	t.logger.Info("process end")
 }

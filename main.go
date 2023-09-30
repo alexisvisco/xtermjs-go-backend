@@ -7,7 +7,7 @@ import (
 )
 
 func main() {
-	config := server.TTYServerConfig{
+	config := server.Config{
 		Address: ":3000",
 	}
 

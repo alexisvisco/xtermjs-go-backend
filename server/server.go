@@ -7,25 +7,20 @@ import (
 	"net/http"
 )
 
-type PTYHandler interface {
-	Write(data []byte) (int, error)
-	Refresh()
-}
-
-// TTYServerConfig is used to configure the tty server before it is started
-type TTYServerConfig struct {
+// Config is used to configure the tty server before it is started
+type Config struct {
 	Address string
 }
 
-// TTYServer represents the instance of a tty server
-type TTYServer struct {
+// Server represents the instance of a tty server
+type Server struct {
 	httpServer *http.Server
-	config     TTYServerConfig
+	config     Config
 }
 
 // New creates a new instance
-func New(config TTYServerConfig) (server *TTYServer) {
-	server = &TTYServer{
+func New(config Config) (server *Server) {
+	server = &Server{
 		config: config,
 	}
 	server.httpServer = &http.Server{
@@ -33,22 +28,16 @@ func New(config TTYServerConfig) (server *TTYServer) {
 	}
 	routesHandler := mux.NewRouter()
 
-	installHandlers := func(session string) {
-		ttyWsPath := "/s/" + session + "/ws"
-
-		routesHandler.HandleFunc(ttyWsPath, func(w http.ResponseWriter, r *http.Request) {
-			server.handleTTYWebsocket(w, r)
-		})
-	}
-
-	installHandlers("local")
+	routesHandler.HandleFunc("/s/local/ws", func(w http.ResponseWriter, r *http.Request) {
+		server.handleTerminalWebsocket(w, r)
+	})
 
 	server.httpServer.Handler = routesHandler
 
 	return server
 }
 
-func (server *TTYServer) handleTTYWebsocket(w http.ResponseWriter, r *http.Request) {
+func (server *Server) handleTerminalWebsocket(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" {
 		w.WriteHeader(http.StatusForbidden)
 		return
@@ -74,13 +63,13 @@ func (server *TTYServer) handleTTYWebsocket(w http.ResponseWriter, r *http.Reque
 	}
 }
 
-func (server *TTYServer) Run() (err error) {
+func (server *Server) Run() (err error) {
 	err = server.httpServer.ListenAndServe()
 	log.Debug("Server finished")
 	return
 }
 
-func (server *TTYServer) Stop() error {
+func (server *Server) Stop() error {
 	log.Debug("Stopping the server")
 	return server.httpServer.Close()
 }
