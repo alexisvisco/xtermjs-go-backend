@@ -3,13 +3,12 @@ package server
 import (
 	"encoding/json"
 	"github.com/gorilla/websocket"
+	log "github.com/sirupsen/logrus"
 	"io"
-	"sync"
 )
 
 const (
-	MsgIDWrite   = "Write"
-	MsgIDWinSize = "WinSize"
+	MsgIDWrite = "Write"
 )
 
 type MsgWrapper struct {
@@ -22,23 +21,15 @@ type MsgTTYWrite struct {
 	Size int
 }
 
-type MsgTTYWinSize struct {
-	Cols int
-	Rows int
+type WSMessager struct {
+	ws     *websocket.Conn
+	logger *log.Entry
 }
 
-type OnMsgWrite func(data []byte)
-
-type OnMsgWinSize func(cols, rows int)
-
-type TTYProtocolWSLocked struct {
-	ws   *websocket.Conn
-	lock sync.Mutex
-}
-
-func NewTTYProtocolWSLocked(ws *websocket.Conn) *TTYProtocolWSLocked {
-	return &TTYProtocolWSLocked{
-		ws: ws,
+func NewWSMessenger(ws *websocket.Conn, l *log.Entry) *WSMessager {
+	return &WSMessager{
+		ws:     ws,
+		logger: l.WithField("component", "ws-messager"),
 	}
 }
 
@@ -54,68 +45,48 @@ func marshalMsg(aMessage interface{}) (_ []byte, err error) {
 		return json.Marshal(msg)
 	}
 
-	if winChangedMsg, ok := aMessage.(MsgTTYWinSize); ok {
-		msg.Type = MsgIDWinSize
-		msg.Data, err = json.Marshal(winChangedMsg)
-		if err != nil {
-			return
-		}
-		return json.Marshal(msg)
-	}
-
 	return nil, nil
 }
 
-func (handler *TTYProtocolWSLocked) ReadAndHandle(onWrite OnMsgWrite, onWinSize OnMsgWinSize) (err error) {
+// Next reads a message from the websocket connection
+func (m *WSMessager) Next() chan []byte {
+	writerChan := make(chan []byte, 1)
+
 	var msg MsgWrapper
 
-	_, r, err := handler.ws.NextReader()
-	if err != nil {
-		// underlaying conn is closed. signal that through io.EOF
-		return io.EOF
-	}
+	go func() {
+		_, r, err := tryReadNext(m)
+		if err != nil {
+			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+				m.logger.WithError(err).Error("unexpected close error")
+			}
 
-	err = json.NewDecoder(r).Decode(&msg)
-
-	if err != nil {
-		return
-	}
-
-	switch msg.Type {
-	case MsgIDWrite:
-		var msgWrite MsgTTYWrite
-		err = json.Unmarshal(msg.Data, &msgWrite)
-		if err == nil {
-			onWrite(msgWrite.Data)
+			close(writerChan)
+			return
 		}
-	case MsgIDWinSize:
-		var msgRemoteWinSize MsgTTYWinSize
-		err = json.Unmarshal(msg.Data, &msgRemoteWinSize)
-		if err == nil {
-			onWinSize(msgRemoteWinSize.Cols, msgRemoteWinSize.Rows)
+
+		err = json.NewDecoder(r).Decode(&msg)
+
+		if err != nil {
+			return
 		}
-	}
-	return
-}
 
-func (handler *TTYProtocolWSLocked) SetWinSize(cols, rows int) (err error) {
-	msgWinChanged := MsgTTYWinSize{
-		Cols: cols,
-		Rows: rows,
-	}
-	data, err := marshalMsg(msgWinChanged)
-	if err != nil {
-		return
-	}
+		switch msg.Type {
+		case MsgIDWrite:
+			var msgWrite MsgTTYWrite
+			err = json.Unmarshal(msg.Data, &msgWrite)
+			if err == nil {
+				writerChan <- msgWrite.Data
+				close(writerChan)
+			}
+		}
+	}()
 
-	handler.lock.Lock()
-	err = handler.ws.WriteMessage(websocket.TextMessage, data)
-	handler.lock.Unlock()
-	return
+	return writerChan
 }
 
 // Function to send data from one the sender to the server and the other way around.
-func (handler *TTYProtocolWSLocked) Write(buff []byte) (n int, err error) {
+func (m *WSMessager) Write(buff []byte) (n int, err error) {
 	msgWrite := MsgTTYWrite{
 		Data: buff,
 		Size: len(buff),
@@ -125,8 +96,15 @@ func (handler *TTYProtocolWSLocked) Write(buff []byte) (n int, err error) {
 		return 0, err
 	}
 
-	handler.lock.Lock()
-	n, err = len(buff), handler.ws.WriteMessage(websocket.TextMessage, data)
-	handler.lock.Unlock()
+	n, err = len(buff), m.ws.WriteMessage(websocket.TextMessage, data)
 	return
+}
+
+func tryReadNext(handler *WSMessager) (mt int, reader io.Reader, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = io.EOF
+		}
+	}()
+	return handler.ws.NextReader()
 }

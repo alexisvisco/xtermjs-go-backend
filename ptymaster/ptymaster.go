@@ -1,18 +1,22 @@
 package ptymaster
 
 import (
+	"fmt"
+	log "github.com/sirupsen/logrus"
 	"os"
 	"os/exec"
 	"os/signal"
 	"syscall"
 	"time"
 
-	"github.com/creack/pty"
-	log "github.com/sirupsen/logrus"
+	ptyhandler "github.com/creack/pty"
 	"golang.org/x/crypto/ssh/terminal"
 )
 
-type onWindowChangedCB func(int, int)
+const (
+	Rows = 32
+	Cols = 140
+)
 
 type PTYHandler interface {
 	Write(data []byte) (int, error)
@@ -31,40 +35,56 @@ func New() *PTYMaster {
 	return &PTYMaster{}
 }
 
-func isStdinTerminal() bool {
-	return terminal.IsTerminal(0)
-}
-
-func (m *PTYMaster) Start(command string, args []string, envVars []string) (err error) {
+func (m *PTYMaster) Start(command string, args []string, envVars []string) (pid int, err error) {
 	m.command = exec.Command(command, args...)
 	m.command.Env = envVars
-	m.ptyFile, err = pty.Start(m.command)
 
+	pty, tty, err := ptyhandler.Open()
 	if err != nil {
-		return
+		return 0, fmt.Errorf("could not open pty: %w", err)
+	}
+	defer func(tty *os.File) {
+		err := tty.Close()
+		if err != nil {
+			log.WithError(err).Error("could not close tty")
+		}
+	}(tty)
+
+	if err := ptyhandler.Setsize(pty, &ptyhandler.Winsize{
+		Rows: uint16(Rows),
+		Cols: uint16(Cols),
+	}); err != nil {
+		errClose := pty.Close()
+		if err != nil {
+			return 0, fmt.Errorf("could not set size: %w: could not close pty: %w", err, errClose)
+		}
+		return 0, fmt.Errorf("could not set pty size: %w", err)
 	}
 
-	// Set the initial window size
-	cols, rows := 140, 32
+	if m.command.Stdout == nil {
+		m.command.Stdout = tty
+	}
 
-	m.SetWinSize(rows, cols)
-	return
-}
+	if m.command.Stderr == nil {
+		m.command.Stderr = tty
+	}
 
-func (m *PTYMaster) MakeRaw() (err error) {
-	// Save the initial state of the terminal, before making it RAW. Note that this terminal is the
-	// terminal under which the tty-share command has been started, and it's identified via the
-	// stdin file descriptor (0 in this case)
-	// We need to make this terminal RAW so that when the command (passed here as a string, a shell
-	// usually), is receiving all the input, including the special characters:
-	// so no SIGINT for Ctrl-C, but the RAW character data, so no line discipline.
-	// Read more here: https://www.linusakesson.net/programming/tty/
-	m.terminalInitState, err = terminal.MakeRaw(int(os.Stdin.Fd()))
-	return
-}
+	if m.command.Stdin == nil {
+		m.command.Stdin = tty
+	}
 
-func (m *PTYMaster) GetWinSize() (int, int, error) {
-	return 140, 32, nil
+	m.command.SysProcAttr = &syscall.SysProcAttr{
+		Setctty: true,
+		Setsid:  true,
+	}
+
+	if err := m.command.Start(); err != nil {
+		_ = pty.Close()
+		return 0, fmt.Errorf("could not start command: %w", err)
+	}
+
+	m.ptyFile = pty
+	return m.command.Process.Pid, nil
 }
 
 func (m *PTYMaster) Write(b []byte) (int, error) {
@@ -76,27 +96,20 @@ func (m *PTYMaster) Read(b []byte) (int, error) {
 }
 
 func (m *PTYMaster) SetWinSize(rows, cols int) {
-	winSize := pty.Winsize{
+	ptyhandler.Setsize(m.ptyFile, &ptyhandler.Winsize{
 		Rows: uint16(rows),
 		Cols: uint16(cols),
-	}
-	pty.Setsize(m.ptyFile, &winSize)
+	})
 }
 
 func (m *PTYMaster) Refresh() {
 	// We wanna force the app to re-draw itself, but there doesn't seem to be a way to do that
 	// so we fake it by resizing the window quickly, making it smaller and then back big
-	cols, rows, err := m.GetWinSize()
-
-	if err != nil {
-		return
-	}
-
-	m.SetWinSize(rows-1, cols)
+	m.SetWinSize(Rows-1, Cols)
 
 	go func() {
 		time.Sleep(time.Millisecond * 50)
-		m.SetWinSize(rows, cols)
+		m.SetWinSize(Rows, Cols)
 	}()
 }
 
@@ -114,30 +127,4 @@ func (m *PTYMaster) Close() (err error) {
 	// (bash for example doesn't finish if only a SIGTERM has been sent)
 	m.command.Process.Signal(syscall.SIGKILL)
 	return
-}
-
-func onWindowChanges(wcCB onWindowChangedCB) {
-	wcChan := make(chan os.Signal, 1)
-	signal.Notify(wcChan, syscall.SIGWINCH)
-	// The interface for getting window changes from the pty slave to its process, is via signals.
-	// In our case here, the tty-share command (built in this project) is the client, which should
-	// get notified if the terminal window in which it runs has changed. To get that, it needs to
-	// register for SIGWINCH signal, which is used by the kernel to tell process that the window
-	// has changed its dimentions.
-	// Read more here: https://www.linusakesson.net/programming/tty/
-	// Shortly, ioctl calls are used to communicate from the process to the pty slave device,
-	// and signals are used for the communiation in the reverse direction: from the pty slave
-	// device to the process.
-
-	for {
-		select {
-		case <-wcChan:
-			cols, rows, err := terminal.GetSize(0)
-			if err == nil {
-				wcCB(cols, rows)
-			} else {
-				log.Warnf("Can't get window size: %s", err.Error())
-			}
-		}
-	}
 }
