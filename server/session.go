@@ -68,8 +68,6 @@ func (t *terminalSession) waitPtyMaster() {
 	t.logger.Info("process end")
 }
 
-//func (t *terminalSession)
-
 func (t *terminalSession) Handle() error {
 	pid, err := t.pty.Start("/bin/zsh", nil, os.Environ())
 	if err != nil {
@@ -85,7 +83,9 @@ func (t *terminalSession) Handle() error {
 	defer t.safeClosePtyMaster()
 	defer t.safeCloseWSConnection()
 
+	// copy every bytes from the pty to the websocket connection
 	go t.copyPTYToWS()
+
 	go t.waitPtyMaster()
 
 	t.listen()
@@ -93,7 +93,8 @@ func (t *terminalSession) Handle() error {
 	return nil
 }
 
-// listen will wait for new data
+// listen for events from the websocket connection
+// it will write on the pty master the data received from the websocket connection (xtermjs)
 func (t *terminalSession) listen() {
 	for {
 		select {
